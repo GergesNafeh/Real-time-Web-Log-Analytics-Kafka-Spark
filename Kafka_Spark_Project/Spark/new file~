@@ -1,0 +1,81 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import regexp_extract, col
+
+# -------------------------------
+# 1️⃣ Spark Session
+# -------------------------------
+spark = SparkSession.builder \
+    .appName("KafkaWebLogsStreamingAnalysis") \
+    .getOrCreate()
+
+spark.sparkContext.setLogLevel("WARN")
+
+# -------------------------------
+# 2️⃣ Read from Kafka
+# -------------------------------
+df = spark.readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", "localhost:9092") \
+    .option("subscribe", "web-logs") \
+    .load()
+
+logs = df.selectExpr("CAST(value AS STRING) as log")
+
+# -------------------------------
+# 3️⃣ Parse Logs
+# -------------------------------
+parsed = logs.select(
+    regexp_extract("log", r'^(\S+)', 1).alias("ip"),
+    regexp_extract("log", r'\[(.*?)\]', 1).alias("timestamp"),
+    regexp_extract("log", r'"(GET|POST|PUT|DELETE)', 1).alias("method"),
+    regexp_extract("log", r'"(?:GET|POST|PUT|DELETE) (.*?) HTTP', 1).alias("url"),
+    regexp_extract("log", r'" (\d{3}) ', 1).alias("status"),
+    regexp_extract("log", r'" \d{3} (\d+)', 1).alias("size"),
+    regexp_extract("log", r'"Mozilla.*"', 0).alias("user_agent")
+)
+
+# -------------------------------
+# 4️⃣ Analysis
+# -------------------------------
+status_count = parsed.groupBy("status").count()
+errors_df = parsed.filter(parsed.status.cast("int") >= 400)
+bots_df = parsed.filter(parsed.user_agent.contains("Bot"))
+top_ips = parsed.groupBy("ip").count().orderBy("count", ascending=False)
+
+# -------------------------------
+# 5️⃣ Write Stream to CSV
+# -------------------------------
+base_path = "/home/bigdata/Desktop/output"
+
+query_status = status_count.writeStream \
+    .outputMode("complete") \
+    .format("csv") \
+    .option("path", f"{base_path}/status_count") \
+    .option("checkpointLocation", f"{base_path}/checkpoint/status_count") \
+    .start()
+
+query_errors = errors_df.writeStream \
+    .outputMode("append") \
+    .format("csv") \
+    .option("path", f"{base_path}/errors") \
+    .option("checkpointLocation", f"{base_path}/checkpoint/errors") \
+    .start()
+
+query_bots = bots_df.writeStream \
+    .outputMode("append") \
+    .format("csv") \
+    .option("path", f"{base_path}/bots") \
+    .option("checkpointLocation", f"{base_path}/checkpoint/bots") \
+    .start()
+
+query_top_ips = top_ips.writeStream \
+    .outputMode("complete") \
+    .format("csv") \
+    .option("path", f"{base_path}/top_ips") \
+    .option("checkpointLocation", f"{base_path}/checkpoint/top_ips") \
+    .start()
+
+# -------------------------------
+# 6️⃣ Keep streaming
+# -------------------------------
+spark.streams.awaitAnyTermination()

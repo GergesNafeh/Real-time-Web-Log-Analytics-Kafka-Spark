@@ -1,0 +1,33 @@
+from kafka import KafkaProducer
+import time
+
+TOPIC_NAME = 'WEB-log'
+KAFKA_SERVER = 'localhost:9092'
+LOG_FILE = '/home/bigdata/Kafka_Spark_Project/Data/access.log'
+
+producer = KafkaProducer(
+    bootstrap_servers=KAFKA_SERVER,
+    value_serializer=lambda v: v.encode('utf-8'),
+    linger_ms=100,
+    batch_size=16384,
+    max_request_size=10_000_000
+)
+
+count = 0
+with open(LOG_FILE, 'r', encoding='utf-8', errors='ignore') as file:
+    for line in file:
+        line = line.strip()
+        if not line:
+            continue
+
+        producer.send(TOPIC_NAME, value=line)
+        count += 1
+
+        if count % 1000 == 0:
+            producer.flush()
+            time.sleep(1)
+
+producer.flush()
+print("Producer code is running - sending log now")
+print(f"Finished sending {count} lines")
+producer.close()
